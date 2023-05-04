@@ -1,13 +1,16 @@
 from tqdm import tqdm
+import json
 import network
 import utils
 import os
 import random
 import argparse
 import numpy as np
+import torchvision
 
 from torch.utils import data
-from datasets import VOCSegmentation, Cityscapes
+from datasets import VOCSegmentation, Cityscapes, HybridDataset
+from datasets import visualize_class_distribution
 from utils import ext_transforms as et
 from metrics import StreamSegMetrics
 
@@ -27,7 +30,9 @@ def get_argparser():
     parser.add_argument("--data_root", type=str, default='./datasets/data',
                         help="path to Dataset")
     parser.add_argument("--dataset", type=str, default='voc',
-                        choices=['voc', 'cityscapes'], help='Name of dataset')
+                        choices=['voc', 'cityscapes', 'hybrid_dataset'], help='Name of dataset')
+    parser.add_argument("--max_train_examples", type=int, default=100,
+                        help="max number of train examples from the dataset")
     parser.add_argument("--num_classes", type=int, default=None,
                         help="num classes (default: None)")
 
@@ -38,11 +43,14 @@ def get_argparser():
                               )
     parser.add_argument("--model", type=str, default='deeplabv3plus_mobilenet',
                         choices=available_models, help='model name')
+    parser.add_argument("--pretrained_backbone", action='store_true', default=False, 
+                        help='use pretrained backbone')
     parser.add_argument("--separable_conv", action='store_true', default=False,
                         help="apply separable conv to decoder and aspp")
     parser.add_argument("--output_stride", type=int, default=16, choices=[8, 16])
 
     # Train Options
+    parser.add_argument('--freeze_layers', help='delimited layer list input', type=str, default='')
     parser.add_argument("--test_only", action='store_true', default=False)
     parser.add_argument("--save_val_results", action='store_true', default=False,
                         help="save segmentation results to \"./results\"")
@@ -71,7 +79,7 @@ def get_argparser():
                         help="GPU ID")
     parser.add_argument("--weight_decay", type=float, default=1e-4,
                         help='weight decay (default: 1e-4)')
-    parser.add_argument("--random_seed", type=int, default=1,
+    parser.add_argument("--random_seed", type=int, default=11,
                         help="random seed (default: 1)")
     parser.add_argument("--print_interval", type=int, default=10,
                         help="print interval of loss (default: 10)")
@@ -83,18 +91,21 @@ def get_argparser():
     # PASCAL VOC Options
     parser.add_argument("--year", type=str, default='2012',
                         choices=['2012_aug', '2012', '2011', '2009', '2008', '2007'], help='year of VOC')
-
+    
+    # Hybrid Dataset Options
+    parser.add_argument("--data_source", type=str, default='real',
+                        choices=['real', 'synthetic'], help='data source for Hybrid Dataset')
+    
     # Visdom options
     parser.add_argument("--enable_vis", action='store_true', default=False,
                         help="use visdom for visualization")
-    parser.add_argument("--vis_port", type=str, default='13570',
+    parser.add_argument("--vis_port", type=str, default='8067',
                         help='port for visdom')
     parser.add_argument("--vis_env", type=str, default='main',
                         help='env for visdom')
     parser.add_argument("--vis_num_samples", type=int, default=8,
                         help='number of samples for visualization (default: 8)')
     return parser
-
 
 def get_dataset(opts):
     """ Dataset And Augmentation
@@ -150,7 +161,61 @@ def get_dataset(opts):
                                split='train', transform=train_transform)
         val_dst = Cityscapes(root=opts.data_root,
                              split='val', transform=val_transform)
-    return train_dst, val_dst
+
+    if opts.dataset == 'hybrid_dataset':
+
+        train_transform = et.ExtCompose([
+            # et.ExtResize( 512 ),
+            et.ExtRandomCrop(size=(opts.crop_size, opts.crop_size)),
+            et.ExtRandomHorizontalFlip(),
+            et.ExtToTensor(),
+            et.ExtNormalize(mean=[0.485, 0.456, 0.406],
+                            std=[0.229, 0.224, 0.225]),
+        ])
+        val_transform = et.ExtCompose([
+            et.ExtToTensor(),
+            et.ExtNormalize(mean=[0.485, 0.456, 0.406],
+                            std=[0.229, 0.224, 0.225]),
+        ]) 
+
+        # Auxiliary dataset for forming the TEST dataset
+        train_dst = HybridDataset(root_path=opts.data_root + '\\' + opts.data_source + '\\train',
+                                  input_dir='rgb',
+                                  target_dir='semantic_segmentation_mapped',
+                                  transform=train_transform,
+                                  type=opts.data_source)
+        val_dst = HybridDataset(root_path=opts.data_root + '\\real\\val',
+                                input_dir='rgb',
+                                target_dir='semantic_segmentation_mapped',
+                                transform=val_transform,
+                                type='real')
+        test_dst = HybridDataset(root_path=opts.data_root + '\\real\\train',
+                                 input_dir='rgb',
+                                 target_dir='semantic_segmentation_mapped',
+                                 transform=val_transform,
+                                 type='real')
+        
+        train_dst_indices = list(np.arange(0, len(train_dst), 1))
+        test_dst_indices = list(np.arange(0, len(test_dst), 1))
+
+        temp_indices = list(zip(train_dst_indices, test_dst_indices))
+        random.Random(opts.random_seed).shuffle(temp_indices)
+        train_dst_indices, test_dst_indices = list(train_dst_indices), list(test_dst_indices)
+        
+        train_dst_indices = train_dst_indices[0:opts.max_train_examples]
+        test_dst_indices = test_dst_indices[len(test_dst)-500:len(test_dst)]
+
+        print('Train dataset size: ', len(train_dst_indices))
+        print('Val dataset size: ', 500)
+        print('Test dataset size: ', len(test_dst_indices))
+
+        train_dst = data.Subset(dataset=train_dst, indices=train_dst_indices)
+        test_dst = data.Subset(dataset=test_dst, indices=test_dst_indices)
+    
+        # visualize_class_distribution(train_dst)
+        # visualize_class_distribution(test_dst)
+
+    return train_dst, val_dst, test_dst
 
 
 def validate(opts, model, loader, device, metrics, ret_samples_ids=None):
@@ -214,6 +279,8 @@ def main():
         opts.num_classes = 21
     elif opts.dataset.lower() == 'cityscapes':
         opts.num_classes = 19
+    elif opts.dataset.lower() == 'hybrid_dataset':
+        opts.num_classes = 17
 
     # Setup visualization
     vis = Visualizer(port=opts.vis_port,
@@ -234,17 +301,20 @@ def main():
     if opts.dataset == 'voc' and not opts.crop_val:
         opts.val_batch_size = 1
 
-    train_dst, val_dst = get_dataset(opts)
+    train_dst, val_dst, test_dst = get_dataset(opts)
     train_loader = data.DataLoader(
         train_dst, batch_size=opts.batch_size, shuffle=True, num_workers=2,
         drop_last=True)  # drop_last=True to ignore single-image batches.
     val_loader = data.DataLoader(
         val_dst, batch_size=opts.val_batch_size, shuffle=True, num_workers=2)
-    print("Dataset: %s, Train set: %d, Val set: %d" %
-          (opts.dataset, len(train_dst), len(val_dst)))
+    test_loader = data.DataLoader(
+        test_dst, batch_size=1, shuffle=True, num_workers=2)
+    
+    print("Dataset: %s, Train set: %d, Val set: %d, Test set: %d" %
+          (opts.dataset, len(train_dst), len(val_dst), len(test_dst)))
 
     # Set up model (all models are 'constructed at network.modeling)
-    model = network.modeling.__dict__[opts.model](num_classes=opts.num_classes, output_stride=opts.output_stride)
+    model = network.modeling.__dict__[opts.model](num_classes=opts.num_classes, output_stride=opts.output_stride, pretrained_backbone=opts.pretrained_backbone)
     if opts.separable_conv and 'plus' in opts.model:
         network.convert_to_separable_conv(model.classifier)
     utils.set_bn_momentum(model.backbone, momentum=0.01)
@@ -294,19 +364,37 @@ def main():
         model.load_state_dict(checkpoint["model_state"])
         model = nn.DataParallel(model)
         model.to(device)
+
         if opts.continue_training:
             optimizer.load_state_dict(checkpoint["optimizer_state"])
             scheduler.load_state_dict(checkpoint["scheduler_state"])
             cur_itrs = checkpoint["cur_itrs"]
             best_score = checkpoint['best_score']
             print("Training state restored from %s" % opts.ckpt)
-        print("Model restored from %s" % opts.ckpt)
+
+        print("Model state loaded from %s" % opts.ckpt)
         del checkpoint  # free memory
     else:
         print("[!] Retrain")
         model = nn.DataParallel(model)
         model.to(device)
 
+    if not opts.freeze_layers == '':
+        layer_names = [str(layer_name) for layer_name in opts.freeze_layers.split(',')]
+        
+        # Freezing layers for fine-tuning
+        for name, param in model.named_parameters():
+            for layer_name in layer_names:
+                if param.requires_grad and layer_name in name:
+                    print("[!] Freezing: ", name)
+                    param.requires_grad = False
+
+    model_name_prefix = 'checkpoints/%s_%s_%d_os%d_%s_' % (opts.data_source, 
+                                                           opts.dataset,
+                                                           opts.max_train_examples,
+                                                           opts.output_stride,
+                                                           'finetune' if opts.freeze_layers != '' else 'pretrain')
+       
     # ==========   Train Loop   ==========#
     vis_sample_id = np.random.randint(0, len(val_loader), opts.vis_num_samples,
                                       np.int32) if opts.enable_vis else None  # sample idxs for visualization
@@ -314,9 +402,12 @@ def main():
 
     if opts.test_only:
         model.eval()
-        val_score, ret_samples = validate(
-            opts=opts, model=model, loader=val_loader, device=device, metrics=metrics, ret_samples_ids=vis_sample_id)
-        print(metrics.to_str(val_score))
+        test_score, ret_samples = validate(
+            opts=opts, model=model, loader=test_loader, device=device, metrics=metrics, ret_samples_ids=vis_sample_id)
+        
+        test_metrics_prefix = opts.ckpt.split('/')[-1].split('.')[0] if opts.ckpt else model_name_prefix
+        with open('checkpoints/' + test_metrics_prefix + '_test_metrics.txt', 'w') as f:
+            f.write(json.dumps(test_score, indent=4))
         return
 
     interval_loss = 0
@@ -348,8 +439,7 @@ def main():
                 interval_loss = 0.0
 
             if (cur_itrs) % opts.val_interval == 0:
-                save_ckpt('checkpoints/latest_%s_%s_os%d.pth' %
-                          (opts.model, opts.dataset, opts.output_stride))
+                save_ckpt(model_name_prefix + 'LATEST.pth')
                 print("validation...")
                 model.eval()
                 val_score, ret_samples = validate(
@@ -358,18 +448,21 @@ def main():
                 print(metrics.to_str(val_score))
                 if val_score['Mean IoU'] > best_score:  # save best model
                     best_score = val_score['Mean IoU']
-                    save_ckpt('checkpoints/best_%s_%s_os%d.pth' %
-                              (opts.model, opts.dataset, opts.output_stride))
+                    save_ckpt(model_name_prefix + 'BEST.pth')
 
                 if vis is not None:  # visualize validation score and samples
                     vis.vis_scalar("[Val] Overall Acc", cur_itrs, val_score['Overall Acc'])
                     vis.vis_scalar("[Val] Mean IoU", cur_itrs, val_score['Mean IoU'])
                     vis.vis_table("[Val] Class IoU", val_score['Class IoU'])
 
+                with open(model_name_prefix + 'LATEST' + '_train_metrics.txt', 'w') as f:
+                    val_score_text = json.dumps(val_score, indent=4)
+                    f.write(val_score_text)
+
                     for k, (img, target, lbl) in enumerate(ret_samples):
                         img = (denorm(img) * 255).astype(np.uint8)
-                        target = train_dst.decode_target(target).transpose(2, 0, 1).astype(np.uint8)
-                        lbl = train_dst.decode_target(lbl).transpose(2, 0, 1).astype(np.uint8)
+                        target = train_dst.decode_target(target).transpose(2, 0, 1).astype(np.uint8) if opts.dataset != 'hybrid_dataset' else HybridDataset.decode_target(target).transpose(2, 0, 1).astype(np.uint8)
+                        lbl = train_dst.decode_target(lbl).transpose(2, 0, 1).astype(np.uint8) if opts.dataset != 'hybrid_dataset' else HybridDataset.decode_target(lbl).transpose(2, 0, 1).astype(np.uint8)
                         concat_img = np.concatenate((img, target, lbl), axis=2)  # concat along width
                         vis.vis_image('Sample %d' % k, concat_img)
                 model.train()
@@ -377,7 +470,7 @@ def main():
 
             if cur_itrs >= opts.total_itrs:
                 return
-
+            
 
 if __name__ == '__main__':
     main()

@@ -1,0 +1,1 @@
+python main.py --data_root=E:\Datasets --dataset=hybrid_dataset --num_classes=17 --model=deeplabv3_resnet50 --pretrained_backbone --output_stride=16 --gpu_id=0 --print_interval=1 --data_source=real --enable_vis --vis_port=8067 --vis_num_samples=2 --test_only --ckpt=./checkpoints/real_hybrid_dataset_250_os16_pretrain_BEST.pth
