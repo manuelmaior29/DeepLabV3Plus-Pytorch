@@ -1,0 +1,1 @@
+python predict.py --input=E:/Datasets/real/train/rgb/rgb_real_2900 --dataset=hybrid_dataset --model=deeplabv3_resnet50 --ckpt=./checkpoints/trial_3/real_hybrid_dataset_500_os16_finetune_BEST.pth --gpu_id=0 --save_val_results_to=./checkpoints/trial_3
