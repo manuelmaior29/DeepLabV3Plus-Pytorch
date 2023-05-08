@@ -35,6 +35,12 @@ def get_argparser():
                         help="max number of train examples from the dataset")
     parser.add_argument("--num_classes", type=int, default=None,
                         help="num classes (default: None)")
+    parser.add_argument("--mixed_hybrid", action='store_true', default=False,
+                        help='If hybrid dataset used, mix CS with Carla data')
+    parser.add_argument("--mixed_hybrid_synthetic_examples", type=int, default=100,
+                        help="max number of SYNTHETIC train examples from the dataset (if mixed_hybrid=true)")
+    parser.add_argument("--mixed_hybrid_real_examples", type=int, default=100,
+                        help="max number of REAL train examples from the dataset (if mixed_hybrid=true)")
 
     # Deeplab Options
     available_models = sorted(name for name in network.modeling.__dict__ if name.islower() and \
@@ -178,42 +184,117 @@ def get_dataset(opts):
                             std=[0.229, 0.224, 0.225]),
         ]) 
 
-        # Auxiliary dataset for forming the TEST dataset
-        train_dst = HybridDataset(root_path=opts.data_root + '\\' + opts.data_source + '\\train',
-                                  input_dir='rgb',
-                                  target_dir='semantic_segmentation_mapped',
-                                  transform=train_transform,
-                                  type=opts.data_source)
         val_dst = HybridDataset(root_path=opts.data_root + '\\real\\val',
+                        input_dir='rgb',
+                        target_dir='semantic_segmentation_mapped',
+                        transform=val_transform,
+                        type='real')
+
+        test_dst = HybridDataset(root_path=opts.data_root + '\\real\\train',
                                 input_dir='rgb',
                                 target_dir='semantic_segmentation_mapped',
                                 transform=val_transform,
                                 type='real')
-        test_dst = HybridDataset(root_path=opts.data_root + '\\real\\train',
-                                 input_dir='rgb',
-                                 target_dir='semantic_segmentation_mapped',
-                                 transform=val_transform,
-                                 type='real')
+
+        if opts.mixed_hybrid:
+
+            train_dst_synthetic = HybridDataset(root_path=opts.data_root + '\\synthetic\\train',
+                                    input_dir='rgb',
+                                    target_dir='semantic_segmentation_mapped',
+                                    transform=train_transform,
+                                    type='synthetic')
+            
+            train_dst_real = HybridDataset(root_path=opts.data_root + '\\real\\train',
+                                    input_dir='rgb',
+                                    target_dir='semantic_segmentation_mapped',
+                                    transform=train_transform,
+                                    type='real')
+ 
+            # Creation of REAL and SYNTHETIC, entire-dataset, indices
+            train_dst_real_indices = list(np.arange(0, len(train_dst_real), 1))
+            train_dst_synthetic_indices = list(np.arange(0, len(train_dst_synthetic), 1))
+            test_dst_indices = list(np.arange(0, len(test_dst), 1))
+
+            # Shuffling of REAL and SYNTHETIC, entire-dataset, indices
+            temp_indices = list(zip(train_dst_real_indices, test_dst_indices))
+            random.Random(opts.random_seed).shuffle(temp_indices)
+            train_dst_real_indices, test_dst_indices = zip(*temp_indices)
+            train_dst_real_indices, test_dst_indices = list(train_dst_real_indices), list(test_dst_indices)
+            random.Random(opts.random_seed).shuffle(train_dst_synthetic_indices)
+
+            # Slicing of REAL and SYNTHETIC, entire-dataset, indices (for REAL train, last 500 are for Testing)
+            train_dst_real_indices = train_dst_real_indices[0:opts.mixed_hybrid_real_examples]
+            train_dst_synthetic_indices = train_dst_synthetic_indices[0:opts.mixed_hybrid_synthetic_examples]
+            test_dst_indices = test_dst_indices[len(test_dst)-500:len(test_dst)]
+
+            # Initializing subsets based on previously computed indices
+            train_dst_real = data.Subset(dataset=train_dst_real, indices=train_dst_real_indices) # Filter indices
+            train_dst_synthetic = data.Subset(dataset=train_dst_synthetic, indices=train_dst_synthetic_indices) # Filter indices
+            test_dst = data.Subset(dataset=test_dst, indices=test_dst_indices) # Filter indices
+
+            # Concatenation of REAL and SYNTHETIC subsets
+            train_dst_mixed_hybrid = data.ConcatDataset([train_dst_synthetic, train_dst_real])
+            train_dst_mixed_hybrid_indices = list(np.arange(0, len(train_dst_mixed_hybrid), 1))
+            random.Random(opts.random_seed).shuffle(train_dst_mixed_hybrid_indices)
+            train_dst_mixed_hybrid = data.Subset(dataset=train_dst_mixed_hybrid, indices=train_dst_mixed_hybrid_indices) # Filter indices
+
+            # for i in range(len(train_dst_mixed_hybrid)):
+            #     torchvision.transforms.ToPILImage()(train_dst_mixed_hybrid[i][0]).show()
+
+            # exit(2)
+            print('Train dataset size: ', len(train_dst_mixed_hybrid))
+            print('\t[Real]: ', len(train_dst_real))
+            print('\t[Synthetic]: ', len(train_dst_synthetic))
+            print('Val dataset size: ', len(val_dst))
+            print('Test dataset size: ', len(test_dst))
+            
+            train_dst = train_dst_mixed_hybrid
+
+            for idx in train_dst_real_indices:
+                if idx in test_dst_indices:
+                    print('Index conflict')
+                    exit(1)
+
+            # visualize_class_distribution(train_dst)
+            # visualize_class_distribution(test_dst)
+            
+        else:
+            train_dst = HybridDataset(root_path=opts.data_root + '\\' + opts.data_source + '\\train',
+                                    input_dir='rgb',
+                                    target_dir='semantic_segmentation_mapped',
+                                    transform=train_transform,
+                                    type=opts.data_source)
         
-        train_dst_indices = list(np.arange(0, len(train_dst), 1))
-        test_dst_indices = list(np.arange(0, len(test_dst), 1))
+            # Creation of real, entire-dataset, indices
+            train_dst_indices = list(np.arange(0, len(train_dst), 1))
+            test_dst_indices = list(np.arange(0, len(test_dst), 1))
 
-        temp_indices = list(zip(train_dst_indices, test_dst_indices))
-        random.Random(opts.random_seed).shuffle(temp_indices)
-        train_dst_indices, test_dst_indices = list(train_dst_indices), list(test_dst_indices)
-        
-        train_dst_indices = train_dst_indices[0:opts.max_train_examples]
-        test_dst_indices = test_dst_indices[len(test_dst)-500:len(test_dst)]
+            # Shuffling of entire-dataset indices
+            temp_indices = list(zip(train_dst_indices, test_dst_indices))
+            random.Random(opts.random_seed).shuffle(temp_indices)
+            train_dst_indices, test_dst_indices = zip(*temp_indices)
+            train_dst_indices, test_dst_indices = list(train_dst_indices), list(test_dst_indices)
+             
+            # Slicing entire-dataset indices (Train and Test - 500 examples)
+            train_dst_indices = train_dst_indices[0:opts.max_train_examples]
+            test_dst_indices = test_dst_indices[len(test_dst)-500:len(test_dst)]
 
-        print('Train dataset size: ', len(train_dst_indices))
-        print('Val dataset size: ', 500)
-        print('Test dataset size: ', len(test_dst_indices))
+            print('Train dataset size: ', len(train_dst_indices))
+            print('Val dataset size: ', len(val_dst))
+            print('Test dataset size: ', len(test_dst_indices))
+            
+            # Initializing subsets based on previously computed indices
+            train_dst = data.Subset(dataset=train_dst, indices=train_dst_indices)
+            test_dst = data.Subset(dataset=test_dst, indices=test_dst_indices)
 
-        train_dst = data.Subset(dataset=train_dst, indices=train_dst_indices)
-        test_dst = data.Subset(dataset=test_dst, indices=test_dst_indices)
-    
-        # visualize_class_distribution(train_dst)
-        # visualize_class_distribution(test_dst)
+            for idx in train_dst_indices:
+                if idx in test_dst_indices:
+                    print('Index conflict')
+                    exit(1)
+
+            # visualize_class_distribution(train_dst)
+            # visualize_class_distribution(test_dst)
+            # exit(3)
 
     return train_dst, val_dst, test_dst
 
@@ -302,6 +383,7 @@ def main():
         opts.val_batch_size = 1
 
     train_dst, val_dst, test_dst = get_dataset(opts)
+
     train_loader = data.DataLoader(
         train_dst, batch_size=opts.batch_size, shuffle=True, num_workers=2,
         drop_last=True)  # drop_last=True to ignore single-image batches.
@@ -389,9 +471,18 @@ def main():
                     print("[!] Freezing: ", name)
                     param.requires_grad = False
 
-    model_name_prefix = 'checkpoints/%s_%s_%d_os%d_%s_' % (opts.data_source, 
+    model_name_prefix = ''
+    if (not opts.mixed_hybrid):
+        model_name_prefix = 'checkpoints/%s_%s_%d_os%d_%s_' % (opts.data_source, 
                                                            opts.dataset,
                                                            opts.max_train_examples,
+                                                           opts.output_stride,
+                                                           'finetune' if opts.freeze_layers != '' else 'pretrain')
+    else:
+        model_name_prefix = 'checkpoints/%s_%s_R%d_S%d_os%d_%s_' % (opts.data_source, 
+                                                           opts.dataset,
+                                                           opts.mixed_hybrid_real_examples,
+                                                           opts.mixed_hybrid_synthetic_examples,
                                                            opts.output_stride,
                                                            'finetune' if opts.freeze_layers != '' else 'pretrain')
        
