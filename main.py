@@ -255,8 +255,9 @@ def get_dataset(opts):
                     print('Index conflict')
                     exit(1)
 
-            # visualize_class_distribution(train_dst)
+            # visualize_class_distribution(train_dst_synthetic)
             # visualize_class_distribution(test_dst)
+            # exit(1)
             
         else:
             train_dst = HybridDataset(root_path=opts.data_root + '\\' + opts.data_source + '\\train',
@@ -479,8 +480,7 @@ def main():
                                                            opts.output_stride,
                                                            'finetune' if opts.freeze_layers != '' else 'pretrain')
     else:
-        model_name_prefix = 'checkpoints/%s_%s_R%d_S%d_os%d_%s_' % (opts.data_source, 
-                                                           opts.dataset,
+        model_name_prefix = 'checkpoints/mixedhybrid_%s_R%d_S%d_os%d_%s_' % (opts.dataset,
                                                            opts.mixed_hybrid_real_examples,
                                                            opts.mixed_hybrid_synthetic_examples,
                                                            opts.output_stride,
