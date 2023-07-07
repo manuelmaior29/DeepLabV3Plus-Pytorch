@@ -27,6 +27,8 @@ def get_argparser():
     # Datset Options
     parser.add_argument("--input", type=str, required=True,
                         help="path to a single image or image directory")
+    parser.add_argument("--gt", type=str, required=True,
+                        help="path to a single image or image directory")
     parser.add_argument("--dataset", type=str, default='voc',
                         choices=['voc', 'cityscapes', 'hybrid_dataset'], help='Name of training set')
 
@@ -105,7 +107,7 @@ def main():
         model.to(device)
 
     #denorm = utils.Denormalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # denormalization for ori images
-
+    gt_transform = None
     if opts.crop_val:
         transform = T.Compose([
                 T.Resize(opts.crop_size),
@@ -120,6 +122,8 @@ def main():
                 T.Normalize(mean=[0.485, 0.456, 0.406],
                                 std=[0.229, 0.224, 0.225]),
             ])
+        gt_transform = T.ToTensor()
+
     if opts.save_val_results_to is not None:
         os.makedirs(opts.save_val_results_to, exist_ok=True)
     with torch.no_grad():
@@ -130,12 +134,28 @@ def main():
             img = Image.open(img_path).convert('RGB')
             img = transform(img).unsqueeze(0) # To tensor of NCHW
             img = img.to(device)
+
+            gt_path = opts.gt
+            ext = os.path.basename(gt_path).split('.')[-1]
+            gt_name = os.path.basename(gt_path)[:-len(ext)-1]
+            gt = Image.open(gt_path).convert('L')
             
             pred = model(img).max(1)[1].cpu().numpy()[0] # HW
+            gt = gt_transform(gt).squeeze(0).numpy()
+            gt *= 255
+            gt = gt.astype('uint8')
+            
+            print(pred)
+            print(gt)
+            
             colorized_preds = decode_fn(pred).astype('uint8')
+            colorized_gt = decode_fn(gt).astype('uint8')
             colorized_preds = Image.fromarray(colorized_preds)
+            colorized_gt = Image.fromarray(colorized_gt)
             if opts.save_val_results_to:
+                print('Saving image')
                 colorized_preds.save(os.path.join(opts.save_val_results_to, img_name+'.png'))
+                colorized_gt.save(os.path.join(opts.save_val_results_to, gt_name+'.png'))
 
 if __name__ == '__main__':
     main()

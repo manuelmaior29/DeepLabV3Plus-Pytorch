@@ -209,6 +209,12 @@ def get_dataset(opts):
                                     target_dir='semantic_segmentation_mapped',
                                     transform=train_transform,
                                     type='real')
+            
+            train_dst_real_init = HybridDataset(root_path=opts.data_root + '\\real\\train',
+                                    input_dir='rgb',
+                                    target_dir='semantic_segmentation_mapped',
+                                    transform=train_transform,
+                                    type='real')
  
             # Creation of REAL and SYNTHETIC, entire-dataset, indices
             train_dst_real_indices = list(np.arange(0, len(train_dst_real), 1))
@@ -241,6 +247,8 @@ def get_dataset(opts):
             # for i in range(len(train_dst_mixed_hybrid)):
             #     torchvision.transforms.ToPILImage()(train_dst_mixed_hybrid[i][0]).show()
 
+            # exit(2)
+            # print(test_dst_indices)
             # exit(2)
             print('Train dataset size: ', len(train_dst_mixed_hybrid))
             print('\t[Real]: ', len(train_dst_real))
@@ -401,6 +409,8 @@ def main():
     if opts.separable_conv and 'plus' in opts.model:
         network.convert_to_separable_conv(model.classifier)
     utils.set_bn_momentum(model.backbone, momentum=0.01)
+    print(model)
+    exit(1)
 
     # Set up metrics
     metrics = StreamSegMetrics(opts.num_classes)
